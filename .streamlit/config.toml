@@ -1,0 +1,21 @@
+# 프로젝트루트/.streamlit/config.toml 로 저장하세요.
+# Streamlit 자체 라이트/다크 설정(우측 상단 Deploy 옆 ⋮ > Settings)이
+# 드롭다운 메뉴·툴팁 등 일부 네이티브 요소를 지배하므로,
+# 기본 테마를 신 UI 다크 팔레트에 정렬해 명암 충돌을 원천 차단합니다.
+# (라이트 계열 테마를 주로 쓴다면 아래 light 블록으로 교체)
+
+[theme]
+base = "dark"
+primaryColor = "#6c8cff"
+backgroundColor = "#0b0f17"
+secondaryBackgroundColor = "#141b28"
+textColor = "#e8edf7"
+font = "sans serif"
+
+# ── 라이트 기본으로 쓰고 싶을 때 ──
+# [theme]
+# base = "light"
+# primaryColor = "#3b5bdb"
+# backgroundColor = "#f6f8fb"
+# secondaryBackgroundColor = "#ffffff"
+# textColor = "#131b2c"
