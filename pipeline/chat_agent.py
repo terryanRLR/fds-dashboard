@@ -59,6 +59,28 @@ _SYSTEM = {
            "或把旧回复当作事实，每次都必须只依据[当前仪表板状态]重新作答，如与旧回复冲突请悄悄予以更正。"),
 }
 
+# ✨ v18: 워처·DB 실측 사실과 자가진단 결과가 상태에 함께 들어온다.
+#   이 값들은 파이썬이 실제로 조회·점검한 것이므로, LLM이 다시 추론하면
+#   그럴듯한 오답을 만든다(예: 멀쩡한 워처를 죽었다고 단정). 인용만 하게 못박는다.
+_FACTS_RULE = {
+    "ko": ("\n[자가진단] 항목이 상태에 있으면, 그 판정과 조치 문구를 그대로 전달하세요. "
+           "원인을 스스로 추측하거나 순서를 바꾸지 말고, '문제'로 표시된 항목을 먼저 안내하세요. "
+           "워처 임계값과 화면 상단 임계값은 서로 다른 값입니다 — 사용자가 '임계값'만 말하면 "
+           "어느 쪽인지 되물어 확인하세요."),
+    "en": ("\nIf a [self-diagnosis] section is present, relay its verdicts and fixes verbatim. "
+           "Do not infer causes yourself or reorder them; surface items marked as problems first. "
+           "The watcher threshold and the on-screen threshold are different values — if the user "
+           "just says 'threshold', ask which one they mean."),
+    "ja": ("\n[自己診断]の項目があれば、その判定と対処文をそのまま伝えてください。"
+           "原因を自分で推測せず、問題と表示された項目を先に案内してください。"
+           "ウォッチャーの閾値と画面上部の閾値は別の値です — 「閾値」とだけ言われたらどちらか確認してください。"),
+    "zh": ("\n若状态中含[自我诊断]部分，请原样转达其判定与处理建议。"
+           "不要自行推测原因，先说明标记为问题的项目。"
+           "监视器阈值与页面顶部阈值是不同的值 — 用户只说\"阈值\"时请先确认是哪一个。"),
+}
+for _lk in list(_SYSTEM):
+    _SYSTEM[_lk] = _SYSTEM[_lk] + _FACTS_RULE.get(_lk, "")
+
 _ROLE = {"ko": ("사용자", "AI"), "en": ("User", "AI"),
          "ja": ("ユーザー", "AI"), "zh": ("用户", "AI")}
 
@@ -184,6 +206,58 @@ ACTIONS = {
             "en": "Set the anomaly threshold (0.0-1.0). Higher = fewer false positives, more misses",
             "ja": "異常判定の閾値設定(0.0〜1.0)。高くすると誤検知↓見逃し↑",
             "zh": "设置异常判定阈值(0.0-1.0)。越高误报↓漏报↑",
+        },
+    },
+    "set_watcher_threshold": {
+        "kind": "field2", "fields": ["review", "confirm"],
+        "example": "set_watcher_threshold(review, 0.30)",
+        "label": {
+            "ko": ("워처(무인 감시) 임계값 설정. review=1차(Slack만·검토요청), "
+                   "confirm=2차(Slack+Email·확정통보). 화면 상단 임계값과는 별개이며 "
+                   "저장 즉시 워처에 5초 내 반영된다. 사용자가 어느 쪽인지 말하지 않았으면 먼저 물을 것"),
+            "en": ("Set the watcher (unattended) threshold. review=tier1 (Slack only), "
+                   "confirm=tier2 (Slack+Email). Separate from the on-screen threshold; "
+                   "applies to the running watcher within 5s. Ask which tier if unspecified"),
+            "ja": ("ウォッチャー(無人監視)の閾値設定。review=1次(Slackのみ)、confirm=2次(Slack+Email)。"
+                   "画面上部の閾値とは別で、保存後5秒以内に反映される"),
+            "zh": ("设置监视器(无人值守)阈值。review=一级(仅Slack)，confirm=二级(Slack+Email)。"
+                   "与页面顶部阈值不同，保存后5秒内生效"),
+        },
+    },
+    "watcher_stop": {
+        "kind": "int", "min": 0, "max": 1440,
+        "example": "watcher_stop(30)",
+        "label": {
+            "ko": ("워처(무인 감시) 중지 요청. 인자는 자동 재개까지의 분(0=무기한). "
+                   "즉시 실행되지 않고 화면에 확인 카드가 뜨며 사람이 승인해야 실행된다. "
+                   "중지 중에는 탐지·알림이 전혀 나가지 않으므로 되도록 자동 재개 시간을 함께 받을 것"),
+            "en": ("Request to stop the watcher. Arg = minutes until auto-resume (0 = indefinite). "
+                   "Shows a confirmation card; a human must approve. Detection stops entirely while off, "
+                   "so prefer asking for an auto-resume time"),
+            "ja": ("ウォッチャー停止要求。引数は自動再開までの分(0=無期限)。確認カードが表示され人の承認が必要"),
+            "zh": ("请求停止监视器。参数为自动恢复前的分钟数(0=无限期)。将显示确认卡片，需人工批准"),
+        },
+    },
+    "watcher_start": {
+        "kind": "none",
+        "example": "watcher_start()",
+        "label": {
+            "ko": "워처(무인 감시) 시작 요청. 확인 카드 승인 후 실행된다",
+            "en": "Request to start the watcher. Runs after confirmation",
+            "ja": "ウォッチャー開始要求。確認後に実行",
+            "zh": "请求启动监视器。确认后执行",
+        },
+    },
+    "reprocess_file": {
+        "kind": "text",
+        "example": "reprocess_file(batch_0804.csv)",
+        "label": {
+            "ko": ("감시 파일의 처리 커서를 지워 전량 재처리한다. 되돌릴 수 없고 "
+                   "이미 보낸 알림이 다시 갈 수 있으므로 확인 카드 승인이 필요하다"),
+            "en": ("Clear a watched file's cursor so it is reprocessed from the start. "
+                   "Irreversible and may resend alerts — requires confirmation"),
+            "ja": "監視ファイルのカーソルを消して全件再処理。確認が必要",
+            "zh": "清除监视文件的游标以重新处理全部行。需确认",
         },
     },
     "select_model": {
