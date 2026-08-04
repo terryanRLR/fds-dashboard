@@ -1,0 +1,17 @@
+{
+  "_version": "v16",
+  "_note": "threshold_report 실측 근거로 결정 (2026-08-04). th_review 0.45→0.10 : 오탐 +4건 대가로 사기 +13건 탐지, 재현율 77.9%→82.9%",
+  "dual_threshold": true,
+  "threshold": 0.5,
+  "th_review": 0.1,
+  "th_confirm": 0.9,
+  "pii_level": "standard",
+  "notify_slack": true,
+  "notify_email": true,
+  "email_to": "",
+  "use_llm": true,
+  "use_rag": true,
+  "rich_visuals": true,
+  "dedup_hours": 24,
+  "dry_run": false
+}

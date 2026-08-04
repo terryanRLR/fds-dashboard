@@ -1904,6 +1904,16 @@ with st.sidebar:
         st.session_state['ov_smtp_pass'] = st.text_input("SMTP Password", st.session_state.get('ov_smtp_pass',''), key="sb_smtp_p", type="password")
 
 
+    # ── 👁 v15: 워처 상태 배지 (읽기 전용) ──────────────────
+    #   watcher.py가 남긴 하트비트를 사이드바에 상시 표시한다.
+    #   pipeline/watcher_panel.py가 없거나 DB가 비어 있어도 대시보드는 영향받지 않는다.
+    try:
+        from pipeline.watcher_panel import render_watcher_badge
+        cbr()
+        render_watcher_badge()
+    except Exception as _wbe:
+        log.debug(f"워처 배지 생략: {_wbe}")
+
     # ✨ v18: 빌드 정보는 사이드바 최하단 — 정보성 캡션이 조작 위젯보다 위에 있을 이유가 없다
     cbr()
     st.caption(f"🏗️ dashboard build {DASH_VERSION}")
@@ -2584,6 +2594,18 @@ def _chat_context(threshold):
     _h = st.session_state.get('det_history') or []
     if _h:
         P.append(f"판정 이력: {len(_h)}건 누적")
+
+    # ── 🤖 v18: 워처·DB 실측 사실 + 자가진단 주입 ────────────────────────────
+    #   기존 컨텍스트는 '화면 스냅샷'뿐이라 봇이 워처에 대해 아무것도 답하지 못했다.
+    #   여기서 넣는 값은 DB·설정 파일에서 실제로 조회한 사실이며,
+    #   진단(왜 알림이 안 오는가)도 파이썬이 점검한 결과다 — LLM은 설명만 한다.
+    #   실패해도 대시보드/챗은 그대로 동작한다.
+    try:
+        from pipeline.agent_facts import context_lines as _wfacts
+        P.extend(_wfacts())
+    except Exception as _afe:
+        log.debug(f"워처 사실 주입 생략: {_afe}")
+
     text = "\n".join(f"- {x}" for x in P)
     try:                       # 자유 텍스트 2차 마스킹(안전망)
         text = _m.mask_text(text)
@@ -2669,6 +2691,56 @@ def _apply_chat_actions(actions):
                 continue
             st.session_state["_pending_threshold"] = _tv
             notes.append(t("chat.act_set_threshold", v=f"{_tv:.2f}"))
+        elif n in ("watcher_stop", "watcher_start", "reprocess_file"):
+            # 🔌 v18: 워처 제어는 즉시 실행하지 않는다.
+            #   · 중지 = 탐지 공백을 만든다(비가역적 결과)
+            #   · 재처리 = 이미 보낸 알림이 다시 나갈 수 있다
+            #   → 세션5 워처 패널에 확인 카드를 띄우고 사람이 승인해야 실행된다.
+            _req = {"op": n, "at": time.strftime("%H:%M:%S")}
+            if n == "watcher_stop":
+                try:
+                    _req["minutes"] = max(0, min(1440, int(a)))
+                except (TypeError, ValueError):
+                    _req["minutes"] = 0
+            elif n == "reprocess_file":
+                _req["file"] = str(a).strip()
+                if not _req["file"]:
+                    continue
+            st.session_state["_watcher_request"] = _req
+            _opl = {"watcher_stop": "워처 중지", "watcher_start": "워처 시작",
+                    "reprocess_file": "파일 재처리"}[n]
+            notes.append(f"{_opl} 요청을 세션5 워처 패널에 올렸습니다 — 승인해야 실행됩니다")
+        elif n == "set_watcher_threshold":
+            # 🤖 v18: 워처(무인) 임계값 변경. 화면 임계값(set_threshold)과 별개다.
+            #   가역 액션이므로 승인 게이트는 없다 — 대신 무엇이 어떻게 바뀌었는지
+            #   반드시 노트로 남기고, 설정 파일에 변경 주체·시각을 감사 기록한다.
+            try:
+                _tier = str(a.get("field", "")).lower()
+                _tv = max(0.0, min(1.0, float(str(a.get("value", "")).strip().rstrip("%"))))
+                if _tv > 1.0:
+                    _tv = _tv / 100.0
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if _tier not in ("review", "confirm"):
+                continue
+            try:
+                from pipeline import watcher_config as _wcfg
+                _cur = _wcfg.load()
+                _old = float(_cur.get(f"th_{_tier}", 0.45 if _tier == "review" else 0.80))
+                _cur[f"th_{_tier}"] = _tv
+                _cur["dual_threshold"] = True
+                _ok, _msg = _wcfg.save(_cur, meta={
+                    "_changed_by": "AI 에이전트 (대시보드 챗)",
+                    "_changed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                if _ok:
+                    _lbl = "1차 검토(Slack)" if _tier == "review" else "2차 확정(Slack+Email)"
+                    notes.append(f"워처 {_lbl} 임계값 {_old:.2f} → {_tv:.2f} "
+                                 f"(다음 폴링 5초 내 반영)")
+                else:
+                    notes.append(f"워처 임계값 저장 실패 — {_msg}")
+            except Exception as _we:
+                notes.append(f"워처 임계값 변경 실패 — {type(_we).__name__}: {_we}")
         elif n == "select_model":
             _avail_m = get_available_models()
             _key = _pick_model_key(_avail_m, str(a))
@@ -4281,6 +4353,66 @@ elif current_session=="05":
                               {k: t(f"s5.{k}") for k in _S5_ORDER}, default="tab3")
         row_to_predict=None
 
+        # ── 💾 v16: [CSV 저장 | inbox 전송 | 탐지 실행 | 일괄 분석] 액션 바 ──────────
+        #   추출·합성한 데이터가 탐지에만 쓰이고 사라지던 문제 해결.
+        #   · CSV 저장  : 브라우저 다운로드 (원본 그대로, 내부 키 _* 는 제외)
+        #   · inbox 전송: 워처 감시 폴더에 저장 → 5초 내 자동 탐지·알림까지 이어짐
+        #   컴팩트(CV)에서는 라벨을 짧게 줄여 버튼 텍스트가 2줄로 접히지 않게 한다.
+        _ACT_L = {
+            "ko": {"csv":"💾 CSV 저장","csv_c":"💾 CSV","inbox":"📤 inbox 전송","inbox_c":"📤 inbox",
+                   "detect":"▶ 탐지 실행","detect_c":"▶ 탐지","batch":"📦 일괄 분석 ({n}건)","batch_c":"📦 일괄 {n}",
+                   "ib_help":"워처 감시 폴더(inbox/)에 CSV로 저장합니다. 워처가 실행 중이면 몇 초 안에 자동 탐지·알림까지 진행됩니다.",
+                   "sent":"📤 inbox 전송 완료 — {f} · 워처가 곧 자동 탐지합니다",
+                   "fail":"저장 실패 — {e}"},
+            "en": {"csv":"💾 Save CSV","csv_c":"💾 CSV","inbox":"📤 Send to inbox","inbox_c":"📤 inbox",
+                   "detect":"▶ Run detection","detect_c":"▶ Detect","batch":"📦 Batch ({n})","batch_c":"📦 {n}",
+                   "ib_help":"Save into the watcher folder (inbox/). If the watcher is running it will detect and notify within seconds.",
+                   "sent":"📤 Sent to inbox — {f}",
+                   "fail":"Save failed — {e}"},
+        }
+
+        def _s5_action_row(rows, sel_row, key, stem):
+            """4버튼 한 줄. '탐지 실행'을 누르면 해당 row를 반환, 아니면 None."""
+            _L = _ACT_L.get(LANG, _ACT_L["ko"])
+            _n = len(rows)
+            _clean = [{k: v for k, v in r.items() if not str(k).startswith('_')} for r in rows]
+            _df = pd.DataFrame(_clean)
+            _ts = time.strftime('%Y%m%d_%H%M%S')
+            _picked = None
+            _c1, _c2, _c3, _c4 = st.columns([0.85, 0.9, 1.0, 1.25])
+            with _c1:
+                st.download_button(_L["csv_c"] if CV else _L["csv"],
+                                   _df.to_csv(index=False).encode('utf-8-sig'),
+                                   file_name=f"{stem}_{_ts}.csv", mime="text/csv",
+                                   key=f"dl_{key}", width='stretch')
+            with _c2:
+                if st.button(_L["inbox_c"] if CV else _L["inbox"], key=f"ib_{key}",
+                             width='stretch', help=_L["ib_help"]):
+                    try:
+                        _ibx = Path(st.session_state.get('watch_inbox', 'inbox'))
+                        _ibx.mkdir(parents=True, exist_ok=True)
+                        _fp = _ibx / f"{stem}_{_ts}.csv"
+                        # 워처가 '쓰는 중인 반쪽 파일'을 읽지 않도록 임시파일 → 원자적 교체
+                        _tmp = _fp.with_name(_fp.name + ".tmp")
+                        _df.to_csv(_tmp, index=False, encoding='utf-8-sig')
+                        _tmp.replace(_fp)
+                        st.success(_L["sent"].format(f=_fp.name))
+                    except Exception as _ibe:
+                        st.error(_L["fail"].format(e=_ibe))
+            with _c3:
+                if st.button(_L["detect_c"] if CV else _L["detect"], key=f"run_{key}",
+                             type="primary", width='stretch'):
+                    _picked = sel_row
+            with _c4:
+                if _n >= 2:
+                    if st.button((_L["batch_c"] if CV else _L["batch"]).format(n=_n),
+                                 key=f"batch_{key}", width='stretch'):
+                        st.session_state['batch_rows'] = rows
+                        st.session_state['batch_go'] = True
+                else:
+                    st.caption(tt("s5.batch_min_warn"))
+            return _picked
+
         if _s5_active=="tab1":
             if st.session_state.get("_pending_manual"):      # 🤖 챗 예약값 적용(위젯 생성 직전)
                 for _wk, _wv in st.session_state.pop("_pending_manual").items():
@@ -4355,17 +4487,9 @@ elif current_session=="05":
                     sr=rp[si]
                 else: sr=rp[0]
                 sr['_input_mode']='test_csv'
-                # ✨ v5.3: 탐지 실행 | 일괄 분석 — 나란히 배치
-                _bc1, _bc2 = st.columns(2)
-                with _bc1:
-                    if st.button(t("s5.run_detect_arrow"), key="run_test2", type="primary", width='stretch'): row_to_predict=sr
-                with _bc2:
-                    if len(rp) >= 2:
-                        if st.button(tt("s5.batch_button", n=len(rp)), key="batch_test", width='stretch'):
-                            st.session_state['batch_rows'] = rp
-                            st.session_state['batch_go'] = True
-                    else:
-                        st.caption(tt("s5.batch_min_warn"))
+                # ✨ v16: [CSV 저장 | inbox 전송 | 탐지 실행 | 일괄 분석]
+                _picked = _s5_action_row(rp, sr, "test2", "test_sample")
+                if _picked is not None: row_to_predict = _picked
 
         if _s5_active=="tab3":
             cbr()
@@ -4463,17 +4587,9 @@ elif current_session=="05":
                 else: sr3=rl[0]
                 tl=sr3.get('_true_label','')
                 st.markdown(f'{t("s5.true_answer_label")} <span class="badge-danger">{FRAUD_SHORT.get(tl,tl or "—")}</span>',unsafe_allow_html=True)
-                # ✨ v5.3: 탐지 실행 | 일괄 분석 — 나란히 배치
-                _bc1, _bc2 = st.columns(2)
-                with _bc1:
-                    if st.button(t("s5.run_detect_arrow"), key="run_train2", type="primary", width='stretch'): row_to_predict=sr3
-                with _bc2:
-                    if len(rl) >= 2:
-                        if st.button(tt("s5.batch_button", n=len(rl)), key="batch_train", width='stretch'):
-                            st.session_state['batch_rows'] = rl
-                            st.session_state['batch_go'] = True
-                    else:
-                        st.caption(tt("s5.batch_min_warn"))
+                # ✨ v16: [CSV 저장 | inbox 전송 | 탐지 실행 | 일괄 분석]
+                _picked = _s5_action_row(rl, sr3, "train2", "train_sample")
+                if _picked is not None: row_to_predict = _picked
 
         if _s5_active=="tab4":
             cbr()
@@ -4518,17 +4634,9 @@ elif current_session=="05":
                     si4=st.selectbox(t("s5.row_select_label"),range(len(rs)),format_func=lambda i:t("s5.row_select_synth_fmt", i=i+1),key="t4_sel")
                     sr4=rs[si4]
                 else: sr4=rs[0]
-                # ✨ v5.3: 탐지 실행 | 일괄 분석 — 나란히 배치
-                _bc1, _bc2 = st.columns(2)
-                with _bc1:
-                    if st.button(t("s5.run_detect_arrow"), key="run_syn2", type="primary", width='stretch'): row_to_predict=sr4
-                with _bc2:
-                    if len(rs) >= 2:
-                        if st.button(tt("s5.batch_button", n=len(rs)), key="batch_syn", width='stretch'):
-                            st.session_state['batch_rows'] = rs
-                            st.session_state['batch_go'] = True
-                    else:
-                        st.caption(tt("s5.batch_min_warn"))
+                # ✨ v16: [CSV 저장 | inbox 전송 | 탐지 실행 | 일괄 분석]
+                _picked = _s5_action_row(rs, sr4, "syn2", "synthetic")
+                if _picked is not None: row_to_predict = _picked
 
         if _s5_active=="tab5":
             cbr()
@@ -5240,6 +5348,18 @@ elif current_session=="05":
                             st.toast(t("db.cleared")); st.rerun()
                 except Exception as _dbe:
                     alert_box(t("db.read_fail", e=_dbe), "error")
+
+    # ── 👁 v15: 워처 상태 패널 (읽기 전용) ────────────────────────────────────
+    #   무인 워처(watcher.py)는 창도 로그도 안 보이는 프로세스다.
+    #   생존 여부·처리량·탐지 이력·watcher.log 꼬리를 여기서 관측한다.
+    #   렌더 실패는 내부에서 전부 삼켜지므로 대시보드 본체에 영향이 없다.
+    if current_session == "05":
+        try:
+            from pipeline.watcher_panel import render_watcher_panel
+            cbr()
+            render_watcher_panel()
+        except Exception as _wpe:
+            log.warning(f"워처 패널 생략: {_wpe}")
 
 
 # ══════════════════════════════════════════════════════════
