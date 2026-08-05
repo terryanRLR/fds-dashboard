@@ -31,4 +31,3 @@ sklearn-pmml-model>=1.0  # PMML (선택 — 미설치 시 pmml 로더만 비활�
 
 # v10 추가 — 음성 입력 (Phase 3, 선택)
 faster-whisper>=1.0        # 로컬 STT (챗봇 음성 입력) — 미설치 시 클라우드 STT로 폴백
-starlette==1.4.0
